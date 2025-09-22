@@ -1,10 +1,13 @@
 __pycache__/
+.cache/
+.python-version
+notes.md
+compile_commands.json
 *.egg-info/
-.build/
+build/
 dist/
 .env/
 .venv/
-.vscode/
 *.png
 *.csv
 *.pt

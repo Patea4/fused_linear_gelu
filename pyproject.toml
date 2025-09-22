@@ -1,0 +1,15 @@
+[project]
+name = "fused-linear-gelu"
+version = "0.1.0"
+description = "Fused linear + GELU Cuda kernel for PyTorch"
+readme = "README.md"
+requires-python = "==3.10.18"
+dependencies = [
+    "expecttest>=0.3.0",
+    "matplotlib>=3.10.6",
+    "numpy>=2.2.6",
+    "pandas>=2.3.2",
+    "torch>=2.6.0",
+    "torchaudio>=2.8.0",
+    "torchvision>=0.23.0",
+]

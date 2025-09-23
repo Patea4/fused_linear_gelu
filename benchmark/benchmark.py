@@ -1,6 +1,21 @@
+import os
+import time
+import contextlib
 import torch
 import torch.nn.functional as F
-import time
+
+@contextlib.contextmanager
+def nvtx(name: str):
+    with torch.cuda.nvtx.range(name):
+        yield
+
+def _nsys_start_if_env():
+    if os.getenv("NSYS_CAPTURE") == "1":
+        torch.cuda.cudart().cudaProfilerStart()
+
+def _nsys_stop_if_env():
+    if os.getenv("NSYS_CAPTURE") == "1":
+        torch.cuda.cudart().cudaProfilerStop()
 
 def test_shapes():
     print("Testing different tensor shapes...")
@@ -18,36 +33,41 @@ def test_shapes():
 
         for input_shape, input_dim, output_dim, has_bias, desc in test_cases:
             print(f"\nTesting {desc}: {input_shape} -> [..., {output_dim}]")
+            with nvtx(f"shapes:{desc}"):
+                torch.manual_seed(42)
+                x = torch.randn(input_shape, device="cuda", dtype=torch.float32)
+                weight = torch.randn(output_dim, input_dim, device="cuda", dtype=torch.float32)
+                bias = torch.randn(output_dim, device="cuda", dtype=torch.float32) if has_bias else None
 
-            torch.manual_seed(42)
-            x = torch.randn(input_shape, device="cuda", dtype=torch.float32)
-            weight = torch.randn(output_dim, input_dim, device="cuda", dtype=torch.float32)
-            bias = torch.randn(output_dim, device="cuda", dtype=torch.float32) if has_bias else None
+                with nvtx("ref:gelu(linear)"):
+                    ref = F.gelu(F.linear(x, weight, bias))
 
-            ref = F.gelu(F.linear(x, weight, bias))
+                with nvtx("fused:linear_gelu"):
+                    fused = fused_linear_gelu.linear_gelu(x, weight, bias)
 
-            fused = fused_linear_gelu.linear_gelu(x, weight, bias)
-            cublas = fused_linear_gelu.linear_gelu_cublas(x, weight, bias)
+                with nvtx("cublas:linear_gelu_cublas"):
+                    cublas = fused_linear_gelu.linear_gelu_cublas(x, weight, bias)
 
-            ok_shape = (ref.shape == fused.shape == cublas.shape)
-            print(f"Shape: {fused.shape}" if ok_shape else f"ERROR: Shape mismatch: ref {ref.shape}, fused {fused.shape}, cublas {cublas.shape}")
-            if not ok_shape:
-                continue
-
-            atol, rtol = 1e-5, 1e-4
-
-            def report(name, y):
-                ok = torch.allclose(ref, y, rtol=rtol, atol=atol)
-                maxdiff = (ref - y).abs().max().item()
-                if ok:
-                    print(f"  {name:<8} matches (max diff: {maxdiff:.2e})")
+                if ref.shape == fused.shape == cublas.shape:
+                    print(f"Shape: {fused.shape}")
                 else:
-                    print(f"  {name:<8} ERROR (max diff: {maxdiff:.2e})")
-                    print(f"    Ref sample:   {ref.flatten()[:3]}")
-                    print(f"    {name} sample: {y.flatten()[:3]}")
+                    print(f"ERROR: Shape mismatch: ref {ref.shape}, fused {fused.shape}, cublas {cublas.shape}")
+                    continue
 
-            report("Fused", fused)
-            report("cuBLAS", cublas)
+                atol, rtol = 1e-5, 1e-4
+
+                def report(name, y):
+                    ok = torch.allclose(ref, y, rtol=rtol, atol=atol)
+                    maxdiff = (ref - y).abs().max().item()
+                    if ok:
+                        print(f"  {name:<8} matches (max diff: {maxdiff:.2e})")
+                    else:
+                        print(f"  {name:<8} ERROR (max diff: {maxdiff:.2e})")
+                        print(f"    Ref sample:    {ref.flatten()[:3]}")
+                        print(f"    {name} sample: {y.flatten()[:3]}")
+
+                report("Fused", fused)
+                report("cuBLAS", cublas)
 
         print("\nShape testing complete!")
         return True
@@ -55,7 +75,6 @@ def test_shapes():
     except Exception as e:
         print(f"ERROR: Shape testing failed: {e}")
         return False
-
 
 def benchmark_vs_pytorch():
     print("\nPerformance comparison across shapes...")
@@ -74,7 +93,7 @@ def benchmark_vs_pytorch():
 
         for shape, desc in test_configs:
             input_dim = shape[-1]
-            output_dim = input_dim  # square-ish for parity
+            output_dim = input_dim
 
             print(f"\n{desc}: {shape} -> {shape[:-1] + [output_dim]}")
 
@@ -82,35 +101,35 @@ def benchmark_vs_pytorch():
             w = torch.randn(output_dim, input_dim, device="cuda", dtype=torch.float32)
             b = torch.randn(output_dim, device="cuda", dtype=torch.float32)
 
-            # Warmup
-            for _ in range(10):
-                _ = F.gelu(F.linear(x, w, b))
-                _ = fused_linear_gelu.linear_gelu(x, w, b)
-                _ = fused_linear_gelu.linear_gelu_cublas(x, w, b)
+            with nvtx(f"warmup:{desc}"):
+                for _ in range(10):
+                    _ = F.gelu(F.linear(x, w, b))
+                    _ = fused_linear_gelu.linear_gelu(x, w, b)
+                    _ = fused_linear_gelu.linear_gelu_cublas(x, w, b)
             torch.cuda.synchronize()
 
             iters = 100
 
-            # PyTorch
-            t0 = time.perf_counter()
-            for _ in range(iters):
-                y_ref = F.gelu(F.linear(x, w, b))
-            torch.cuda.synchronize()
-            t_pt = (time.perf_counter() - t0) / iters * 1000
+            with nvtx(f"bench:PyTorch:{desc}"):
+                t0 = time.perf_counter()
+                for _ in range(iters):
+                    y_ref = F.gelu(F.linear(x, w, b))
+                torch.cuda.synchronize()
+                t_pt = (time.perf_counter() - t0) / iters * 1000
 
-            # Fused (single-kernel)
-            t0 = time.perf_counter()
-            for _ in range(iters):
-                y_fused = fused_linear_gelu.linear_gelu(x, w, b)
-            torch.cuda.synchronize()
-            t_fused = (time.perf_counter() - t0) / iters * 1000
+            with nvtx(f"bench:Fused:{desc}"):
+                t0 = time.perf_counter()
+                for _ in range(iters):
+                    y_fused = fused_linear_gelu.linear_gelu(x, w, b)
+                torch.cuda.synchronize()
+                t_fused = (time.perf_counter() - t0) / iters * 1000
 
-            # cuBLAS path
-            t0 = time.perf_counter()
-            for _ in range(iters):
-                y_cublas = fused_linear_gelu.linear_gelu_cublas(x, w, b)
-            torch.cuda.synchronize()
-            t_cublas = (time.perf_counter() - t0) / iters * 1000
+            with nvtx(f"bench:cuBLAS:{desc}"):
+                t0 = time.perf_counter()
+                for _ in range(iters):
+                    y_cublas = fused_linear_gelu.linear_gelu_cublas(x, w, b)
+                torch.cuda.synchronize()
+                t_cublas = (time.perf_counter() - t0) / iters * 1000
 
             sp_fused = t_pt / t_fused if t_fused > 0 else float("inf")
             sp_cublas = t_pt / t_cublas if t_cublas > 0 else float("inf")
@@ -140,7 +159,6 @@ def benchmark_vs_pytorch():
         print(f"ERROR: Benchmarking failed: {e}")
         return False
 
-
 def main():
     print("Comprehensive Fused Linear+GELU Test")
     print("=" * 60)
@@ -151,11 +169,14 @@ def main():
 
     print(f"GPU: {torch.cuda.get_device_name()}")
 
-    if test_shapes():
-        benchmark_vs_pytorch()
-    else:
-        print("ERROR: Fix shape issues before benchmarking!")
-
+    _nsys_start_if_env()
+    try:
+        if test_shapes():
+            benchmark_vs_pytorch()
+        else:
+            print("ERROR: Fix shape issues before benchmarking!")
+    finally:
+        _nsys_stop_if_env()
 
 if __name__ == "__main__":
     main()

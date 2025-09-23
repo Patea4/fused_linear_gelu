@@ -5,6 +5,8 @@
 #include <ATen/Operators.h>
 #include <torch/all.h>
 #include <torch/library.h>
+#include <nvtx3/nvToolsExt.h>
+#include <nvtx3/nvToolsExtCudaRt.h>
 
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
@@ -29,6 +31,20 @@ PyObject *PyInit__C(void) {
     return PyModule_Create(&module_def);
 }
 }
+
+struct NvtxRange {
+    NvtxRange(const char *name, uint32_t color = 0xFF66CCFF) {
+        nvtxEventAttributes_t a{};
+        a.version = NVTX_VERSION;
+        a.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+        a.colorType = NVTX_COLOR_ARGB;
+        a.color = color;
+        a.messageType = NVTX_MESSAGE_TYPE_ASCII;
+        a.message.ascii = name;
+        nvtxRangePushEx(&a);
+    }
+    ~NvtxRange() { nvtxRangePop(); }
+};
 
 namespace fused_linear_gelu {
 
@@ -185,12 +201,15 @@ at::Tensor linear_gelu_cuda(const at::Tensor &input,
                    (out_features + block_size_y - 1) / block_size_y);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    linear_gelu<<<grid_size, block_size, 0, stream>>>(
-        input_2d.data_ptr<float>(), weight_transpose.data_ptr<float>(),
-        bias->defined() ? bias_contig.data_ptr<float>() : nullptr,
-        output_2d.data_ptr<float>(), total_batch_size, in_features,
-        out_features);
-
+    {
+        NvtxRange r("fused_linear_gelu:gemm+epilogue", 0xFF3CB371);
+        linear_gelu<<<grid_size, block_size, 0, stream>>>(
+            input_2d.data_ptr<float>(), weight_transpose.data_ptr<float>(),
+            bias->defined() ? bias_contig.data_ptr<float>() : nullptr,
+            output_2d.data_ptr<float>(), total_batch_size, in_features,
+            out_features);
+        cudaDeviceSynchronize();
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return output;
@@ -278,15 +297,25 @@ at::Tensor linear_gelu_cublas_cuda(const at::Tensor &input,
     at::Tensor input_2d = input_contig.view({M, K});
     at::Tensor output_2d = output.view({M, N});
 
-    at::mm_out(output_2d, input_2d, weight_contig.transpose(0, 1));
+    {
+        NvtxRange r("cublas:mm_out", 0xFF1E90FF);
+        at::mm_out(output_2d, input_2d, weight_contig.transpose(0, 1));
+        cudaDeviceSynchronize();
+    }
 
     const float *bias_ptr =
         bias_contig.defined() ? bias_contig.data_ptr<float>() : nullptr;
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     dim3 block(16, 16), grid((int((N + 15) / 16)), int((M + 15) / 16));
-    epilogue_bias_gelu<<<grid, block, 0, stream>>>(
-        output_2d.data_ptr<float>(), bias_ptr, output_2d.data_ptr<float>(),
-        (int)M, (int)N);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    {
+        NvtxRange r("epilogue:bias+gelu", 0xFFFFA500);
+        epilogue_bias_gelu<<<grid, block, 0, stream>>>(
+            output_2d.data_ptr<float>(), bias_ptr, output_2d.data_ptr<float>(),
+            (int)M, (int)N);
+        cudaDeviceSynchronize();
+    }
+
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 
     return output;

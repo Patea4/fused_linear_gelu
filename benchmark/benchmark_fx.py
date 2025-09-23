@@ -11,8 +11,6 @@ import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from fx_pass import fuse_linear_gelu_fx
 
-import fused_linear_gelu
-
 # --------------------------
 # Test models
 # --------------------------

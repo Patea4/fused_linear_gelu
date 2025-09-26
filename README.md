@@ -10,14 +10,14 @@ The motivation: reduce kernel launch overhead, improve memory locality, and benc
 
 There are currently **two backends** in this repository:
 
-1. **cuBLAS + single-pass epilogue (baseline)**  
+1. **cuBLAS + single-pass epilogue**  
    - Uses cuBLAS for the matrix multiply.  
    - Adds bias + GELU activation in a single pass afterward.  
 
 2. **Custom fused CUDA kernel (work in progress)**  
    - A hand-written CUDA kernel that performs matmul, bias, and GELU **with one kernel launch**.  
    - Currently optimizing performance for the matmul operation.
-   - The goal is to compare performance against both the baseline and PyTorch.
+   - The goal is to compare performance against both the cuBLAS and PyTorch implementations.
 
 ---
 

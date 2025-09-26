@@ -1,6 +1,7 @@
 # Fused Linear + GELU PyTorch Extension
 
-This project explores **operator fusion in PyTorch** by combining a `Linear` (matrix multiply + bias) and `GELU` activation into a **single CUDA kernel**.  
+This project explores **operator fusion in PyTorch** by combining a `Linear` (matrix multiply + bias) and `GELU` activation into a **single CUDA kernel**.
+
 The motivation: reduce kernel launch overhead, improve memory locality, and benchmark against PyTorch’s native implementation.
 
 ---
